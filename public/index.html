@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="pt-br">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Registro de Carros - MongoDB</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header>
+        <h1>Registro de Carros</h1>
+        <p>Cadastro simples usando MongoDB.</p>
+      </header>
+
+      <section class="form-card">
+        <h2 id="form-title">Novo carro</h2>
+        <form id="car-form">
+          <input type="hidden" name="id" />
+          <div class="grid">
+            <label>
+              Placa
+              <input type="text" name="plate" required />
+            </label>
+            <label>
+              Modelo
+              <input type="text" name="model" required />
+            </label>
+            <label>
+              Marca
+              <input type="text" name="brand" required />
+            </label>
+            <label>
+              Ano
+              <input type="number" name="year" required min="1900" max="2100" />
+            </label>
+            <label>
+              Cor
+              <input type="text" name="color" required />
+            </label>
+          </div>
+          <div class="actions">
+            <button type="submit">Salvar</button>
+            <button type="button" id="cancel-edit" class="button-secondary" hidden>
+              Cancelar
+            </button>
+          </div>
+        </form>
+        <p id="form-message" class="message"></p>
+      </section>
+
+      <section class="table-card">
+        <div class="table-header">
+          <h2>Carros cadastrados</h2>
+          <div class="pager">
+            <label>
+              Por pagina
+              <select id="page-size">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+              </select>
+            </label>
+            <button type="button" id="prev-page" class="button-secondary">Anterior</button>
+            <span id="page-info">Pagina 1 de 1</span>
+            <button type="button" id="next-page">Proxima</button>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Placa</th>
+              <th>Modelo</th>
+              <th>Marca</th>
+              <th>Ano</th>
+              <th>Cor</th>
+              <th>Acoes</th>
+            </tr>
+          </thead>
+          <tbody id="cars-body"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
