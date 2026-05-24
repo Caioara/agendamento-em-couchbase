@@ -1,193 +1,407 @@
-const form = document.getElementById("car-form");
-const message = document.getElementById("form-message");
-const carsBody = document.getElementById("cars-body");
-const formTitle = document.getElementById("form-title");
-const cancelEditButton = document.getElementById("cancel-edit");
-const submitButton = form.querySelector("button[type=\"submit\"]");
-const prevButton = document.getElementById("prev-page");
-const nextButton = document.getElementById("next-page");
-const pageInfo = document.getElementById("page-info");
-const pageSize = document.getElementById("page-size");
-let editingId = null;
-let limit = Number(pageSize.value) || 10;
-let offset = 0;
-let total = 0;
+const userArea = document.getElementById("user-area");
+const userPill = document.getElementById("user-pill");
+const logoutBtn = document.getElementById("logout-btn");
+const loginForm = document.getElementById("login-form");
+const registerForm = document.getElementById("register-form");
+const loginMessage = document.getElementById("login-message");
+const registerMessage = document.getElementById("register-message");
+const eventForm = document.getElementById("event-form");
+const eventMessage = document.getElementById("event-message");
+const eventsList = document.getElementById("events-list");
+const myEventsList = document.getElementById("my-events-list");
+const myEnrollmentsList = document.getElementById("my-enrollments-list");
+const remindersList = document.getElementById("reminders-list");
+const dashboard = document.getElementById("dashboard");
+const createEventCard = document.getElementById("create-event-card");
+const myEventsCard = document.getElementById("my-events-card");
+const allEnrollmentsCard = document.getElementById("all-enrollments-card");
+const allEnrollmentsList = document.getElementById("all-enrollments-list");
+const searchInput = document.getElementById("search-input");
+const fromDate = document.getElementById("from-date");
+const toDate = document.getElementById("to-date");
+const searchBtn = document.getElementById("search-btn");
+const scrollEvents = document.getElementById("scroll-events");
+const scrollAuth = document.getElementById("scroll-auth");
 
-function setEditMode(car) {
-  editingId = car.id;
-  formTitle.textContent = "Editar carro";
-  submitButton.textContent = "Salvar alteracoes";
-  cancelEditButton.hidden = false;
+let currentUser = null;
 
-  form.elements.plate.value = car.plate;
-  form.elements.model.value = car.model;
-  form.elements.brand.value = car.brand;
-  form.elements.year.value = car.year;
-  form.elements.color.value = car.color;
+function setMessage(target, text, isSuccess = false) {
+  target.textContent = text;
+  target.classList.toggle("success", isSuccess);
 }
 
-function resetForm() {
-  editingId = null;
-  formTitle.textContent = "Novo carro";
-  submitButton.textContent = "Salvar";
-  cancelEditButton.hidden = true;
-  form.reset();
+async function request(path, options = {}) {
+  const response = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    ...options
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const error = data.error || "Erro inesperado.";
+    throw new Error(error);
+  }
+
+  return response.json();
 }
 
-function renderCars(cars) {
-  carsBody.innerHTML = "";
+function formatDate(value) {
+  const date = new Date(value);
+  return date.toLocaleString("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short"
+  });
+}
 
-  cars.forEach((car) => {
-    const row = document.createElement("tr");
+function renderEvents(list, target, options = {}) {
+  target.innerHTML = "";
+  if (!list.length) {
+    target.innerHTML = "<p class=\"empty\">Nenhum evento encontrado.</p>";
+    return;
+  }
 
-    row.innerHTML = `
-      <td>${car.plate}</td>
-      <td>${car.model}</td>
-      <td>${car.brand}</td>
-      <td>${car.year}</td>
-      <td>${car.color}</td>
-      <td class="action-cell">
-        <button data-action="edit" data-id="${car.id}">Editar</button>
-        <button data-action="delete" data-id="${car.id}" class="button-secondary">Excluir</button>
-      </td>
+  list.forEach((item) => {
+    const card = document.createElement("div");
+    card.className = "event-card";
+
+    const enrollButton = options.canEnroll
+      ? `<button data-action="enroll" data-id="${item.id}" class="primary">Inscrever</button>`
+      : "";
+
+    const cancelButton = options.canCancel
+      ? `<button data-action="cancel" data-id="${item.id}" class="ghost">Cancelar</button>`
+      : "";
+
+    const statusTag = item.status && item.status !== "open" ? ` - ${item.status}` : "";
+
+    card.innerHTML = `
+      <div class="event-header">
+        <div>
+          <h4>${item.title}${statusTag}</h4>
+          <p>${item.location || "Local nao informado"}</p>
+        </div>
+        <span class="badge">${item.capacity} vagas</span>
+      </div>
+      <p>${item.description || "Sem descricao"}</p>
+      <p><strong>Inicio:</strong> ${formatDate(item.startAt)} | <strong>Duracao:</strong> ${item.durationMinutes} min</p>
+      <div class="event-actions">
+        ${enrollButton}
+        ${cancelButton}
+      </div>
     `;
 
-    row.querySelector("[data-action=\"edit\"]").addEventListener("click", () => {
-      setEditMode(car);
-    });
-
-    row.querySelector("[data-action=\"delete\"]").addEventListener("click", async () => {
-      await deleteCar(car.id);
-    });
-
-    carsBody.appendChild(row);
+    target.appendChild(card);
   });
 }
 
-async function fetchCars() {
-  const response = await fetch(`/api/cars?limit=${limit}&offset=${offset}`);
-  const data = await response.json();
-  const cars = Array.isArray(data) ? data : data.items;
-  total = Array.isArray(data) ? cars.length : data.total;
-
-  if (total > 0 && offset >= total) {
-    offset = Math.max(total - limit, 0);
-    return fetchCars();
+function renderEnrollments(items) {
+  myEnrollmentsList.innerHTML = "";
+  if (!items.length) {
+    myEnrollmentsList.innerHTML = "<p class=\"empty\">Sem inscricoes ativas.</p>";
+    return;
   }
 
-  renderCars(cars || []);
-  updatePager();
-}
+  items.forEach((item) => {
+    const card = document.createElement("div");
+    card.className = "event-card";
+    const statusTag = item.status !== "active" ? ` - ${item.status}` : "";
 
-function updatePager() {
-  const totalPages = Math.max(Math.ceil(total / limit), 1);
-  const currentPage = Math.min(Math.floor(offset / limit) + 1, totalPages);
+    card.innerHTML = `
+      <div class="event-header">
+        <div>
+          <h4>${item.event.title}${statusTag}</h4>
+          <p>${item.event.location || "Local nao informado"}</p>
+        </div>
+        <span class="badge">${item.event.capacity} vagas</span>
+      </div>
+      <p>${item.event.description || "Sem descricao"}</p>
+      <p><strong>Inicio:</strong> ${formatDate(item.event.startAt)}</p>
+      <div class="event-actions">
+        <button data-action="cancel-enrollment" data-id="${item.id}" class="ghost">Cancelar inscricao</button>
+      </div>
+    `;
 
-  pageInfo.textContent = `Pagina ${currentPage} de ${totalPages}`;
-  prevButton.disabled = offset === 0;
-  nextButton.disabled = offset + limit >= total;
-}
-
-async function createCar(data) {
-  const response = await fetch("/api/cars", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(data)
+    myEnrollmentsList.appendChild(card);
   });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Erro ao salvar.");
-  }
-
-  return response.json();
 }
 
-async function updateCar(id, data) {
-  const response = await fetch(`/api/cars/${id}`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(data)
+function renderReminders(items) {
+  remindersList.innerHTML = "";
+  if (!items.length) {
+    remindersList.innerHTML = "<p class=\"empty\">Sem lembretes nas proximas 24h.</p>";
+    return;
+  }
+
+  items.forEach((item) => {
+    const card = document.createElement("div");
+    card.className = "event-card";
+    card.innerHTML = `
+      <h4>${item.event.title}</h4>
+      <p>${item.event.location || "Local nao informado"}</p>
+      <p><strong>Inicio:</strong> ${formatDate(item.event.startAt)}</p>
+    `;
+    remindersList.appendChild(card);
   });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Erro ao atualizar.");
-  }
-
-  return response.json();
 }
 
-async function deleteCar(id) {
-  const response = await fetch(`/api/cars/${id}`, {
-    method: "DELETE"
+function renderAllEnrollments(items) {
+  allEnrollmentsList.innerHTML = "";
+  if (!items.length) {
+    allEnrollmentsList.innerHTML = "<p class=\"empty\">Nenhuma inscricao registrada.</p>";
+    return;
+  }
+
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "table-row";
+    row.innerHTML = `
+      <div>
+        <strong>Cliente</strong>
+        <span>${item.user.name} (${item.user.email})</span>
+      </div>
+      <div>
+        <strong>Evento</strong>
+        <span>${item.event.title}</span>
+        <div class="muted">${formatDate(item.event.startAt)}</div>
+      </div>
+      <div>
+        <strong>Status</strong>
+        <span>${item.status}</span>
+      </div>
+      <div>
+        <strong>Inscricao</strong>
+        <span>${formatDate(item.createdAt)}</span>
+      </div>
+    `;
+    allEnrollmentsList.appendChild(row);
   });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Erro ao excluir.");
-  }
-
-  await fetchCars();
 }
 
-form.addEventListener("submit", async (event) => {
+function updateUI() {
+  if (currentUser) {
+    userPill.textContent = `${currentUser.name} (${currentUser.role})`;
+    logoutBtn.hidden = false;
+    dashboard.hidden = false;
+    createEventCard.hidden = !(currentUser.role === "admin" || currentUser.role === "professional");
+    myEventsCard.hidden = !(currentUser.role === "admin" || currentUser.role === "professional");
+    allEnrollmentsCard.hidden = !(currentUser.role === "admin" || currentUser.role === "professional");
+  } else {
+    userPill.textContent = "Visitante";
+    logoutBtn.hidden = true;
+    dashboard.hidden = true;
+  }
+}
+
+async function loadSession() {
+  const data = await request("/api/auth/me");
+  currentUser = data.user;
+  updateUI();
+}
+
+async function loadEvents() {
+  const params = new URLSearchParams();
+  if (searchInput.value) params.set("q", searchInput.value);
+  if (fromDate.value) params.set("from", new Date(fromDate.value).toISOString());
+  if (toDate.value) params.set("to", new Date(toDate.value).toISOString());
+
+  const data = await request(`/api/events?${params.toString()}`);
+  const canEnroll = currentUser && currentUser.role === "client";
+  renderEvents(data.items, eventsList, { canEnroll });
+}
+
+async function loadMyEvents() {
+  if (!currentUser || (currentUser.role !== "admin" && currentUser.role !== "professional")) {
+    return;
+  }
+  const data = await request("/api/events/mine");
+  renderEvents(data.items, myEventsList, { canCancel: true });
+}
+
+async function loadEnrollments() {
+  if (!currentUser) return;
+  const data = await request("/api/enrollments/me");
+  renderEnrollments(data.items || []);
+}
+
+async function loadReminders() {
+  if (!currentUser) return;
+  const data = await request("/api/reminders/upcoming");
+  renderReminders(data.items || []);
+}
+
+async function loadAllEnrollments() {
+  if (!currentUser || (currentUser.role !== "admin" && currentUser.role !== "professional")) {
+    return;
+  }
+  const data = await request("/api/enrollments/all");
+  renderAllEnrollments(data.items || []);
+}
+
+loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  message.classList.remove("success");
+  setMessage(loginMessage, "");
 
-  const formData = new FormData(form);
-  const data = {
-    plate: formData.get("plate").trim(),
-    model: formData.get("model").trim(),
-    brand: formData.get("brand").trim(),
-    year: Number(formData.get("year")),
-    color: formData.get("color").trim()
+  const formData = new FormData(loginForm);
+  const payload = {
+    email: formData.get("email"),
+    password: formData.get("password")
   };
 
   try {
-    if (editingId) {
-      await updateCar(editingId, data);
-      message.textContent = "Carro atualizado com sucesso.";
-    } else {
-      await createCar(data);
-      message.textContent = "Carro cadastrado com sucesso.";
-    }
-
-    resetForm();
-    message.classList.add("success");
-    await fetchCars();
+    const data = await request("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    currentUser = data.user;
+    updateUI();
+    setMessage(loginMessage, "Login realizado.", true);
+    await loadEvents();
+    await loadMyEvents();
+    await loadEnrollments();
+    await loadReminders();
+    await loadAllEnrollments();
   } catch (error) {
-    message.textContent = error.message;
-    message.classList.remove("success");
+    setMessage(loginMessage, error.message);
   }
 });
 
-cancelEditButton.addEventListener("click", () => {
-  resetForm();
-  message.textContent = "Edicao cancelada.";
-  message.classList.remove("success");
+registerForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  setMessage(registerMessage, "");
+
+  const formData = new FormData(registerForm);
+  const payload = {
+    name: formData.get("name"),
+    email: formData.get("email"),
+    password: formData.get("password"),
+    role: formData.get("role")
+  };
+
+  try {
+    const data = await request("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    currentUser = data.user;
+    updateUI();
+    setMessage(registerMessage, "Cadastro concluido.", true);
+    await loadEvents();
+    await loadMyEvents();
+    await loadEnrollments();
+    await loadReminders();
+    await loadAllEnrollments();
+  } catch (error) {
+    setMessage(registerMessage, error.message);
+  }
 });
 
-prevButton.addEventListener("click", async () => {
-  offset = Math.max(offset - limit, 0);
-  await fetchCars();
+logoutBtn.addEventListener("click", async () => {
+  await request("/api/auth/logout", { method: "POST" });
+  currentUser = null;
+  updateUI();
+  await loadEvents();
 });
 
-nextButton.addEventListener("click", async () => {
-  offset += limit;
-  await fetchCars();
+searchBtn.addEventListener("click", async () => {
+  await loadEvents();
 });
 
-pageSize.addEventListener("change", async () => {
-  limit = Number(pageSize.value) || 10;
-  offset = 0;
-  await fetchCars();
+scrollEvents.addEventListener("click", () => {
+  document.getElementById("events-section").scrollIntoView({ behavior: "smooth" });
 });
 
-fetchCars().catch(() => {
-  message.textContent = "Nao foi possivel carregar os carros.";
+scrollAuth.addEventListener("click", () => {
+  document.getElementById("auth-section").scrollIntoView({ behavior: "smooth" });
 });
+
+eventsList.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.dataset.action === "enroll") {
+    try {
+      await request(`/api/events/${button.dataset.id}/enroll`, { method: "POST", body: "{}" });
+      await loadEvents();
+      await loadEnrollments();
+      await loadReminders();
+      await loadAllEnrollments();
+    } catch (error) {
+      alert(error.message);
+    }
+  }
+});
+
+myEventsList.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.dataset.action === "cancel") {
+    const ok = confirm("Deseja cancelar este evento?");
+    if (!ok) return;
+    try {
+      await request(`/api/events/${button.dataset.id}`, { method: "DELETE" });
+      await loadMyEvents();
+      await loadEvents();
+      await loadAllEnrollments();
+    } catch (error) {
+      alert(error.message);
+    }
+  }
+});
+
+myEnrollmentsList.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.dataset.action === "cancel-enrollment") {
+    const ok = confirm("Deseja cancelar sua inscricao?");
+    if (!ok) return;
+    try {
+      await request(`/api/enrollments/${button.dataset.id}/cancel`, { method: "POST" });
+      await loadEnrollments();
+      await loadReminders();
+      await loadEvents();
+      await loadAllEnrollments();
+    } catch (error) {
+      alert(error.message);
+    }
+  }
+});
+
+if (eventForm) {
+  eventForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    setMessage(eventMessage, "");
+
+    const formData = new FormData(eventForm);
+    const payload = {
+      title: formData.get("title"),
+      description: formData.get("description"),
+      location: formData.get("location"),
+      startAt: new Date(formData.get("startAt")).toISOString(),
+      durationMinutes: Number(formData.get("durationMinutes")),
+      capacity: Number(formData.get("capacity"))
+    };
+
+    try {
+      await request("/api/events", {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      eventForm.reset();
+      setMessage(eventMessage, "Evento criado.", true);
+      await loadMyEvents();
+      await loadEvents();
+      await loadAllEnrollments();
+    } catch (error) {
+      setMessage(eventMessage, error.message);
+    }
+  });
+}
+
+(async () => {
+  await loadSession();
+  await loadEvents();
+  await loadMyEvents();
+  await loadEnrollments();
+  await loadReminders();
+  await loadAllEnrollments();
+})();

@@ -1,45 +1,39 @@
-# Registro de Carros com MongoDB
+# Agenda Flow com MongoDB
 
-Sistema simples de registro de carros usando Node.js, Express e MongoDB.
+Sistema de agendamento com eventos e inscricoes usando Node.js, Express e MongoDB.
 
 ## Requisitos
 
-- Node.js 18+
-- MongoDB em execucao (local ou via Docker)
+- Docker + Docker Compose
 
-## Configuracao
+## Configuracao (Docker)
 
-1) Copie o arquivo .env.example para .env e ajuste os valores.
-2) Defina o banco com MONGODB_DB (ex: carros).
+1) Ajuste as variaveis no docker-compose.yml (MONGODB_DB e SESSION_SECRET).
 
-## Como rodar
+## Como rodar (Docker)
 
 ```
-npm install
-npm run start
+docker compose up --build
 ```
 
 A aplicacao sobe em http://localhost:3000
 
-## API
+## API (resumo)
 
-- GET /api/cars?limit=10&offset=0
-- GET /api/cars/:id
-- POST /api/cars
-- PUT /api/cars/:id
-- DELETE /api/cars/:id
-
-### Exemplo de payload
-
-```
-{
-	"plate": "ABC-1234",
-	"model": "Onix",
-	"brand": "Chevrolet",
-	"year": 2022,
-	"color": "Branco"
-}
-```
+- POST /api/auth/register
+- POST /api/auth/login
+- POST /api/auth/logout
+- GET /api/auth/me
+- GET /api/events?limit=10&offset=0&q=
+- GET /api/events/:id
+- GET /api/events/mine
+- POST /api/events
+- PUT /api/events/:id
+- DELETE /api/events/:id
+- POST /api/events/:id/enroll
+- GET /api/enrollments/me
+- POST /api/enrollments/:id/cancel
+- GET /api/reminders/upcoming?hours=24
 
 ## Benchmark e graficos (MongoDB)
 

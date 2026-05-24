@@ -6,7 +6,8 @@ services:
     environment:
       PORT: 3000
       MONGODB_URI: mongodb://mongo:27017
-      MONGODB_DB: carros
+      MONGODB_DB: agendamentos
+      SESSION_SECRET: troque-esta-chave
     depends_on:
       - mongo
   mongo:
