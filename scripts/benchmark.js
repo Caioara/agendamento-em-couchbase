@@ -58,20 +58,25 @@ function summarize(latencies, totalMs) {
   };
 }
 
-function buildCarPayload(index) {
+function buildEventPayload(index) {
   return {
-    plate: `ZZZ-${String(index).padStart(4, "0")}`,
-    model: "Bench",
-    brand: "Benchmark",
-    year: 2020,
-    color: "Cinza",
+    code: `EVT-${String(index).padStart(5, "0")}`,
+    title: `Evento Benchmark ${index}`,
+    description: "Carga sintetica para benchmark.",
+    location: "Sala 01",
+    startAt: new Date(Date.now() + index * 60000).toISOString(),
+    endAt: new Date(Date.now() + (index + 60) * 60000).toISOString(),
+    durationMinutes: 60,
+    capacity: 20,
+    status: "open",
+    createdBy: "benchmark",
     createdAt: new Date().toISOString()
   };
 }
 
 async function main() {
   const uri = process.env.MONGODB_URI;
-  const dbName = process.env.MONGODB_DB || "carros";
+  const dbName = process.env.MONGODB_DB || "agendamentos";
 
   if (!uri) {
     throw new Error("MONGODB_URI nao configurado.");
@@ -80,9 +85,9 @@ async function main() {
   const client = new MongoClient(uri);
   await client.connect();
   const db = client.db(dbName);
-  const cars = db.collection("cars_bench");
+  const events = db.collection("events_bench");
 
-  await cars.deleteMany({});
+  await events.deleteMany({});
 
   const ids = Array.from({ length: CONFIG.inserts }, (_, i) => i);
 
@@ -90,7 +95,7 @@ async function main() {
   const insertStart = nowMs();
   await runWithConcurrency(ids, async (id, idx) => {
     const start = nowMs();
-    await cars.insertOne(buildCarPayload(idx));
+    await events.insertOne(buildEventPayload(idx));
     insertLatencies.push(nowMs() - start);
   }, CONFIG.concurrency);
   const insertTotal = nowMs() - insertStart;
@@ -99,7 +104,7 @@ async function main() {
   const readStart = nowMs();
   await runWithConcurrency(ids.slice(0, CONFIG.reads), async (_, idx) => {
     const start = nowMs();
-    await cars.findOne({ plate: `ZZZ-${String(idx).padStart(4, "0")}` });
+    await events.findOne({ code: `EVT-${String(idx).padStart(5, "0")}` });
     readLatencies.push(nowMs() - start);
   }, CONFIG.concurrency);
   const readTotal = nowMs() - readStart;
@@ -108,9 +113,9 @@ async function main() {
   const updateStart = nowMs();
   await runWithConcurrency(ids.slice(0, CONFIG.updates), async (_, idx) => {
     const start = nowMs();
-    await cars.updateOne(
-      { plate: `ZZZ-${String(idx).padStart(4, "0")}` },
-      { $set: { color: "Azul", updatedAt: new Date().toISOString() } }
+    await events.updateOne(
+      { code: `EVT-${String(idx).padStart(5, "0")}` },
+      { $set: { location: "Sala 02", updatedAt: new Date().toISOString() } }
     );
     updateLatencies.push(nowMs() - start);
   }, CONFIG.concurrency);
@@ -120,12 +125,12 @@ async function main() {
   const deleteStart = nowMs();
   await runWithConcurrency(ids.slice(0, CONFIG.deletes), async (_, idx) => {
     const start = nowMs();
-    await cars.deleteOne({ plate: `ZZZ-${String(idx).padStart(4, "0")}` });
+    await events.deleteOne({ code: `EVT-${String(idx).padStart(5, "0")}` });
     deleteLatencies.push(nowMs() - start);
   }, CONFIG.concurrency);
   const deleteTotal = nowMs() - deleteStart;
 
-  const payloadSize = Buffer.from(JSON.stringify(buildCarPayload(1))).length;
+  const payloadSize = Buffer.from(JSON.stringify(buildEventPayload(1))).length;
 
   const results = {
     timestamp: new Date().toISOString(),

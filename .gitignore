@@ -2,4 +2,8 @@ node_modules/
 .env
 data/results.json
 reports/
+!reports/
+!reports/*.png
+reports/*.jpg
+reports/*.jpeg
 artigo.docx
