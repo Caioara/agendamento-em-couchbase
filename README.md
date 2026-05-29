@@ -1,6 +1,6 @@
-# Agenda Flow com MongoDB
+# Agenda Flow com Couchbase
 
-Sistema de agendamento com eventos e inscricoes usando Node.js, Express e MongoDB.
+Sistema de agendamento com eventos e inscricoes usando Node.js, Express e Couchbase.
 
 ## Requisitos
 
@@ -8,7 +8,7 @@ Sistema de agendamento com eventos e inscricoes usando Node.js, Express e MongoD
 
 ## Configuracao (Docker)
 
-1) Ajuste as variaveis no docker-compose.yml (MONGODB_DB e SESSION_SECRET).
+1) Ajuste as variaveis no docker-compose.yml (COUCHBASE_* e SESSION_SECRET).
 
 ## Como rodar (Docker)
 
@@ -35,9 +35,9 @@ A aplicacao sobe em http://localhost:3000
 - POST /api/enrollments/:id/cancel
 - GET /api/reminders/upcoming?hours=24
 
-## Benchmark e graficos (MongoDB)
+## Benchmark e graficos (Couchbase)
 
-1) Garanta o MongoDB rodando e o arquivo .env configurado.
+1) Garanta o Couchbase rodando e o arquivo .env configurado.
 2) Rode o benchmark:
 
 ```
@@ -57,7 +57,7 @@ python scripts/plot.py
 
 Graficos gerados em reports/.
 
-## Checklist de vulnerabilidade (MongoDB)
+## Checklist de vulnerabilidade (Couchbase)
 
 - Use TLS no cluster e rotacione senhas.
 - Evite usuario administrador na app; use permissoes minimas.

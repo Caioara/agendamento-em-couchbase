@@ -1,17 +1,26 @@
 require("dotenv").config();
 
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
 const session = require("express-session");
-const MongoStore = require("connect-mongo");
+const couchbase = require("couchbase");
+const { initCouchbase, collectionPath } = require("./couchbase");
+const { CouchbaseSessionStore } = require("./couchbase-session-store");
 const bcrypt = require("bcryptjs");
-const { initMongo, toObjectId } = require("./mongo");
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "..", "public")));
+
+const sessionStore = new CouchbaseSessionStore({
+  getCollection: async () => {
+    const { collections } = await initCouchbase();
+    return collections.sessions;
+  }
+});
 
 app.use(
   session({
@@ -23,10 +32,7 @@ app.use(
       sameSite: "lax",
       secure: process.env.NODE_ENV === "production"
     },
-    store: MongoStore.create({
-      mongoUrl: process.env.MONGODB_URI,
-      dbName: process.env.MONGODB_DB || "agendamentos"
-    })
+    store: sessionStore
   })
 );
 
@@ -38,7 +44,7 @@ function normalizeEmail(value) {
 
 function safeUser(user) {
   return {
-    id: user._id.toString(),
+    id: user.id,
     name: user.name,
     email: user.email,
     role: user.role,
@@ -90,9 +96,18 @@ function validateEvent(payload) {
   return errors;
 }
 
+function buildEnrollmentKey(eventId, userId) {
+  return `enrollment::${eventId}::${userId}`;
+}
+
+async function getDb() {
+  const { cluster, collections, config } = await initCouchbase();
+  return { cluster, collections, config };
+}
+
 app.post("/api/auth/register", async (req, res) => {
   try {
-    const { users } = await initMongo();
+    const { cluster, collections, config } = await getDb();
     const name = String(req.body.name || "").trim();
     const email = normalizeEmail(req.body.email);
     const password = String(req.body.password || "");
@@ -107,8 +122,22 @@ app.post("/api/auth/register", async (req, res) => {
       return res.status(400).json({ error: "Campos invalidos.", fields: errors });
     }
 
+    const usersPath = collectionPath(config, config.collections.users);
+    const existing = await cluster.query(
+      `SELECT u.id FROM ${usersPath} u WHERE u.email = $email LIMIT 1`,
+      {
+        parameters: { email },
+        scanConsistency: couchbase.QueryScanConsistency.RequestPlus
+      }
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: "Email ja cadastrado." });
+    }
+
     const passwordHash = await bcrypt.hash(password, 10);
     const doc = {
+      id: crypto.randomUUID(),
       name,
       email,
       passwordHash,
@@ -116,27 +145,33 @@ app.post("/api/auth/register", async (req, res) => {
       createdAt: new Date().toISOString()
     };
 
-    const result = await users.insertOne(doc);
-    req.session.userId = result.insertedId.toString();
+    await collections.users.insert(doc.id, doc);
+    req.session.userId = doc.id;
     req.session.role = role;
     req.session.name = name;
 
-    return res.status(201).json({ user: safeUser({ _id: result.insertedId, ...doc }) });
+    return res.status(201).json({ user: safeUser(doc) });
   } catch (error) {
-    if (error.code === 11000) {
-      return res.status(409).json({ error: "Email ja cadastrado." });
-    }
     return res.status(500).json({ error: error.message });
   }
 });
 
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { users } = await initMongo();
+    const { cluster, config } = await getDb();
     const email = normalizeEmail(req.body.email);
     const password = String(req.body.password || "");
 
-    const user = await users.findOne({ email });
+    const usersPath = collectionPath(config, config.collections.users);
+    const { rows } = await cluster.query(
+      `SELECT u.* FROM ${usersPath} u WHERE u.email = $email LIMIT 1`,
+      {
+        parameters: { email },
+        scanConsistency: couchbase.QueryScanConsistency.RequestPlus
+      }
+    );
+
+    const user = rows[0];
     if (!user) {
       return res.status(401).json({ error: "Credenciais invalidas." });
     }
@@ -146,7 +181,7 @@ app.post("/api/auth/login", async (req, res) => {
       return res.status(401).json({ error: "Credenciais invalidas." });
     }
 
-    req.session.userId = user._id.toString();
+    req.session.userId = user.id;
     req.session.role = user.role;
     req.session.name = user.name;
 
@@ -168,48 +203,61 @@ app.get("/api/auth/me", async (req, res) => {
   }
 
   try {
-    const { users } = await initMongo();
-    const user = await users.findOne({ _id: toObjectId(req.session.userId) });
-    if (!user) {
+    const { collections } = await getDb();
+    const result = await collections.users.get(req.session.userId);
+    return res.json({ user: safeUser(result.content) });
+  } catch (error) {
+    if (error instanceof couchbase.DocumentNotFoundError) {
       return res.json({ user: null });
     }
-    return res.json({ user: safeUser(user) });
-  } catch (error) {
     return res.status(500).json({ error: error.message });
   }
 });
 
 app.get("/api/events", async (req, res) => {
   try {
-    const { events } = await initMongo();
+    const { cluster, config } = await getDb();
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
     const query = String(req.query.q || "").trim();
     const from = req.query.from ? parseISODate(req.query.from) : null;
     const to = req.query.to ? parseISODate(req.query.to) : null;
 
-    const filter = { status: "open" };
+    const filters = ["e.status = \"open\""];
+    const parameters = { limit, offset };
+
     if (query) {
-      filter.$text = { $search: query };
+      filters.push(
+        "(LOWER(e.title) LIKE $q OR LOWER(e.description) LIKE $q OR LOWER(e.location) LIKE $q)"
+      );
+      parameters.q = `%${query.toLowerCase()}%`;
     }
-    if (from || to) {
-      filter.startAt = {};
-      if (from) filter.startAt.$gte = from.toISOString();
-      if (to) filter.startAt.$lte = to.toISOString();
+    if (from) {
+      filters.push("e.startAt >= $from");
+      parameters.from = from.toISOString();
+    }
+    if (to) {
+      filters.push("e.startAt <= $to");
+      parameters.to = to.toISOString();
     }
 
-    const [total, items] = await Promise.all([
-      events.countDocuments(filter),
-      events
-        .find(filter)
-        .sort({ startAt: 1 })
-        .skip(offset)
-        .limit(limit)
-        .toArray()
+    const eventsPath = collectionPath(config, config.collections.events);
+    const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+
+    const [totalResult, itemsResult] = await Promise.all([
+      cluster.query(`SELECT COUNT(*) AS total FROM ${eventsPath} e ${whereClause}`, {
+        parameters
+      }),
+      cluster.query(
+        `SELECT e.* FROM ${eventsPath} e ${whereClause} ORDER BY e.startAt ASC LIMIT $limit OFFSET $offset`,
+        { parameters }
+      )
     ]);
 
+    const total = totalResult.rows[0]?.total || 0;
+
     return res.json({
-      items: items.map((item) => ({ id: item._id.toString(), ...item })),
+      items: itemsResult.rows,
       total,
       limit,
       offset
@@ -221,23 +269,32 @@ app.get("/api/events", async (req, res) => {
 
 app.get("/api/events/mine", requireAuth, requireRole(["admin", "professional"]), async (req, res) => {
   try {
-    const { events } = await initMongo();
+    const { cluster, config } = await getDb();
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
-    const filter = { createdBy: req.session.userId };
 
-    const [total, items] = await Promise.all([
-      events.countDocuments(filter),
-      events
-        .find(filter)
-        .sort({ startAt: -1 })
-        .skip(offset)
-        .limit(limit)
-        .toArray()
+    const eventsPath = collectionPath(config, config.collections.events);
+    const parameters = {
+      limit,
+      offset,
+      createdBy: req.session.userId
+    };
+
+    const [totalResult, itemsResult] = await Promise.all([
+      cluster.query(
+        `SELECT COUNT(*) AS total FROM ${eventsPath} e WHERE e.createdBy = $createdBy`,
+        { parameters }
+      ),
+      cluster.query(
+        `SELECT e.* FROM ${eventsPath} e WHERE e.createdBy = $createdBy ORDER BY e.startAt DESC LIMIT $limit OFFSET $offset`,
+        { parameters }
+      )
     ]);
 
+    const total = totalResult.rows[0]?.total || 0;
+
     return res.json({
-      items: items.map((item) => ({ id: item._id.toString(), ...item })),
+      items: itemsResult.rows,
       total,
       limit,
       offset
@@ -249,28 +306,28 @@ app.get("/api/events/mine", requireAuth, requireRole(["admin", "professional"]),
 
 app.get("/api/events/:id", async (req, res) => {
   try {
-    const { events, enrollments } = await initMongo();
-    const objectId = toObjectId(req.params.id);
-    if (!objectId) {
-      return res.status(400).json({ error: "Id invalido." });
-    }
+    const { collections, cluster, config } = await getDb();
+    const eventId = req.params.id;
 
-    const event = await events.findOne({ _id: objectId });
-    if (!event) {
-      return res.status(404).json({ error: "Evento nao encontrado." });
-    }
+    const result = await collections.events.get(eventId);
+    const event = result.content;
 
-    const enrolled = await enrollments.countDocuments({
-      eventId: event._id,
-      status: "active"
-    });
+    const enrollmentsPath = collectionPath(config, config.collections.enrollments);
+    const countResult = await cluster.query(
+      `SELECT COUNT(*) AS count FROM ${enrollmentsPath} e WHERE e.eventId = $eventId AND e.status = "active"`,
+      { parameters: { eventId } }
+    );
+
+    const enrolled = countResult.rows[0]?.count || 0;
 
     return res.json({
-      id: event._id.toString(),
       ...event,
       enrolled
     });
   } catch (error) {
+    if (error instanceof couchbase.DocumentNotFoundError) {
+      return res.status(404).json({ error: "Evento nao encontrado." });
+    }
     return res.status(500).json({ error: error.message });
   }
 });
@@ -282,22 +339,28 @@ app.post("/api/events", requireAuth, requireRole(["admin", "professional"]), asy
       return res.status(400).json({ error: "Campos invalidos.", fields: errors });
     }
 
-    const { events } = await initMongo();
+    const { collections, cluster, config } = await getDb();
     const start = parseISODate(req.body.startAt);
     const end = new Date(start.getTime() + req.body.durationMinutes * 60000);
 
-    const conflict = await events.findOne({
-      createdBy: req.session.userId,
-      status: "open",
-      startAt: { $lt: end.toISOString() },
-      endAt: { $gt: start.toISOString() }
-    });
+    const eventsPath = collectionPath(config, config.collections.events);
+    const conflict = await cluster.query(
+      `SELECT e.id FROM ${eventsPath} e WHERE e.createdBy = $createdBy AND e.status = "open" AND e.startAt < $end AND e.endAt > $start LIMIT 1`,
+      {
+        parameters: {
+          createdBy: req.session.userId,
+          start: start.toISOString(),
+          end: end.toISOString()
+        }
+      }
+    );
 
-    if (conflict) {
+    if (conflict.rows.length > 0) {
       return res.status(409).json({ error: "Conflito de horario com outro evento." });
     }
 
     const doc = {
+      id: crypto.randomUUID(),
       title: String(req.body.title).trim(),
       description: String(req.body.description || "").trim(),
       location: String(req.body.location || "").trim(),
@@ -311,8 +374,8 @@ app.post("/api/events", requireAuth, requireRole(["admin", "professional"]), asy
       updatedAt: null
     };
 
-    const result = await events.insertOne(doc);
-    return res.status(201).json({ id: result.insertedId.toString(), ...doc });
+    await collections.events.insert(doc.id, doc);
+    return res.status(201).json(doc);
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
@@ -320,16 +383,11 @@ app.post("/api/events", requireAuth, requireRole(["admin", "professional"]), asy
 
 app.put("/api/events/:id", requireAuth, requireRole(["admin", "professional"]), async (req, res) => {
   try {
-    const { events } = await initMongo();
-    const objectId = toObjectId(req.params.id);
-    if (!objectId) {
-      return res.status(400).json({ error: "Id invalido." });
-    }
+    const { collections, cluster, config } = await getDb();
+    const eventId = req.params.id;
 
-    const event = await events.findOne({ _id: objectId });
-    if (!event) {
-      return res.status(404).json({ error: "Evento nao encontrado." });
-    }
+    const result = await collections.events.get(eventId);
+    const event = result.content;
 
     if (req.session.role !== "admin" && event.createdBy !== req.session.userId) {
       return res.status(403).json({ error: "Acesso negado." });
@@ -352,19 +410,25 @@ app.put("/api/events/:id", requireAuth, requireRole(["admin", "professional"]), 
     const duration = payload.durationMinutes ?? event.durationMinutes;
     const end = new Date(start.getTime() + duration * 60000);
 
-    const conflict = await events.findOne({
-      _id: { $ne: event._id },
-      createdBy: event.createdBy,
-      status: "open",
-      startAt: { $lt: end.toISOString() },
-      endAt: { $gt: start.toISOString() }
-    });
+    const eventsPath = collectionPath(config, config.collections.events);
+    const conflict = await cluster.query(
+      `SELECT e.id FROM ${eventsPath} e WHERE e.createdBy = $createdBy AND e.status = "open" AND e.startAt < $end AND e.endAt > $start AND e.id != $id LIMIT 1`,
+      {
+        parameters: {
+          createdBy: event.createdBy,
+          start: start.toISOString(),
+          end: end.toISOString(),
+          id: eventId
+        }
+      }
+    );
 
-    if (conflict) {
+    if (conflict.rows.length > 0) {
       return res.status(409).json({ error: "Conflito de horario com outro evento." });
     }
 
     const update = {
+      ...event,
       title: String(payload.title || event.title).trim(),
       description: String(payload.description ?? event.description).trim(),
       location: String(payload.location ?? event.location).trim(),
@@ -375,89 +439,102 @@ app.put("/api/events/:id", requireAuth, requireRole(["admin", "professional"]), 
       updatedAt: new Date().toISOString()
     };
 
-    await events.updateOne({ _id: event._id }, { $set: update });
-    return res.json({ id: event._id.toString(), ...event, ...update });
+    await collections.events.replace(eventId, update);
+    return res.json(update);
   } catch (error) {
+    if (error instanceof couchbase.DocumentNotFoundError) {
+      return res.status(404).json({ error: "Evento nao encontrado." });
+    }
     return res.status(500).json({ error: error.message });
   }
 });
 
 app.delete("/api/events/:id", requireAuth, requireRole(["admin", "professional"]), async (req, res) => {
   try {
-    const { events } = await initMongo();
-    const objectId = toObjectId(req.params.id);
-    if (!objectId) {
-      return res.status(400).json({ error: "Id invalido." });
-    }
+    const { collections } = await getDb();
+    const eventId = req.params.id;
 
-    const event = await events.findOne({ _id: objectId });
-    if (!event) {
-      return res.status(404).json({ error: "Evento nao encontrado." });
-    }
+    const result = await collections.events.get(eventId);
+    const event = result.content;
 
     if (req.session.role !== "admin" && event.createdBy !== req.session.userId) {
       return res.status(403).json({ error: "Acesso negado." });
     }
 
-    await events.updateOne(
-      { _id: event._id },
-      { $set: { status: "cancelled", updatedAt: new Date().toISOString() } }
-    );
+    const update = {
+      ...event,
+      status: "cancelled",
+      updatedAt: new Date().toISOString()
+    };
+
+    await collections.events.replace(eventId, update);
 
     return res.json({ ok: true });
   } catch (error) {
+    if (error instanceof couchbase.DocumentNotFoundError) {
+      return res.status(404).json({ error: "Evento nao encontrado." });
+    }
     return res.status(500).json({ error: error.message });
   }
 });
 
 app.post("/api/events/:id/enroll", requireAuth, requireRole(["client"]), async (req, res) => {
   try {
-    const { events, enrollments } = await initMongo();
-    const objectId = toObjectId(req.params.id);
-    if (!objectId) {
-      return res.status(400).json({ error: "Id invalido." });
-    }
+    const { collections, cluster, config } = await getDb();
+    const eventId = req.params.id;
 
-    const event = await events.findOne({ _id: objectId, status: "open" });
-    if (!event) {
+    const eventResult = await collections.events.get(eventId);
+    const event = eventResult.content;
+
+    if (event.status !== "open") {
       return res.status(404).json({ error: "Evento nao encontrado." });
     }
 
-    const enrolled = await enrollments.countDocuments({
-      eventId: event._id,
-      status: "active"
-    });
+    const enrollmentsPath = collectionPath(config, config.collections.enrollments);
+    const enrolledResult = await cluster.query(
+      `SELECT COUNT(*) AS count FROM ${enrollmentsPath} e WHERE e.eventId = $eventId AND e.status = "active"`,
+      { parameters: { eventId } }
+    );
 
+    const enrolled = enrolledResult.rows[0]?.count || 0;
     if (enrolled >= event.capacity) {
       return res.status(409).json({ error: "Evento lotado." });
     }
 
-    const existing = await enrollments.findOne({
-      eventId: event._id,
-      userId: req.session.userId
-    });
-
-    if (existing && existing.status === "active") {
-      return res.status(409).json({ error: "Ja inscrito." });
+    const enrollmentKey = buildEnrollmentKey(eventId, req.session.userId);
+    let existing;
+    try {
+      const existingResult = await collections.enrollments.get(enrollmentKey);
+      existing = existingResult.content;
+    } catch (error) {
+      if (!(error instanceof couchbase.DocumentNotFoundError)) {
+        throw error;
+      }
     }
 
     const reminderMinutes = typeof req.body.reminderMinutes === "number"
       ? req.body.reminderMinutes
       : 1440;
 
+    if (existing && existing.status === "active") {
+      return res.status(409).json({ error: "Ja inscrito." });
+    }
+
     if (existing) {
       const update = {
+        ...existing,
         status: "active",
         reminderMinutes,
         cancelledAt: null
       };
 
-      await enrollments.updateOne({ _id: existing._id }, { $set: update });
-      return res.status(200).json({ id: existing._id.toString(), ...existing, ...update });
+      await collections.enrollments.replace(enrollmentKey, update);
+      return res.status(200).json(update);
     }
 
     const doc = {
-      eventId: event._id,
+      id: enrollmentKey,
+      eventId,
       userId: req.session.userId,
       status: "active",
       reminderMinutes,
@@ -465,11 +542,11 @@ app.post("/api/events/:id/enroll", requireAuth, requireRole(["client"]), async (
       cancelledAt: null
     };
 
-    const result = await enrollments.insertOne(doc);
-    return res.status(201).json({ id: result.insertedId.toString(), ...doc });
+    await collections.enrollments.insert(enrollmentKey, doc);
+    return res.status(201).json(doc);
   } catch (error) {
-    if (error.code === 11000) {
-      return res.status(409).json({ error: "Ja inscrito." });
+    if (error instanceof couchbase.DocumentNotFoundError) {
+      return res.status(404).json({ error: "Evento nao encontrado." });
     }
     return res.status(500).json({ error: error.message });
   }
@@ -477,32 +554,33 @@ app.post("/api/events/:id/enroll", requireAuth, requireRole(["client"]), async (
 
 app.get("/api/enrollments/me", requireAuth, async (req, res) => {
   try {
-    const { enrollments } = await initMongo();
-    const items = await enrollments
-      .aggregate([
-        { $match: { userId: req.session.userId, status: "active" } },
-        {
-          $lookup: {
-            from: "events",
-            localField: "eventId",
-            foreignField: "_id",
-            as: "event"
-          }
-        },
-        { $unwind: "$event" },
-        { $sort: { createdAt: -1 } }
-      ])
-      .toArray();
+    const { cluster, collections, config } = await getDb();
+    const enrollmentsPath = collectionPath(config, config.collections.enrollments);
+
+    const { rows } = await cluster.query(
+      `SELECT en.*
+       FROM ${enrollmentsPath} en
+       WHERE en.userId = $userId AND en.status = "active"
+       ORDER BY en.createdAt DESC`,
+      { parameters: { userId: req.session.userId } }
+    );
+
+    const items = await Promise.all(
+      rows.map(async (row) => {
+        const eventResult = await collections.events.get(row.eventId);
+        return {
+          id: row.id,
+          status: row.status,
+          reminderMinutes: row.reminderMinutes,
+          createdAt: row.createdAt,
+          cancelledAt: row.cancelledAt,
+          event: eventResult.content
+        };
+      })
+    );
 
     return res.json({
-      items: items.map((item) => ({
-        id: item._id.toString(),
-        status: item.status,
-        reminderMinutes: item.reminderMinutes,
-        createdAt: item.createdAt,
-        cancelledAt: item.cancelledAt,
-        event: { id: item.event._id.toString(), ...item.event }
-      }))
+      items
     });
   } catch (error) {
     return res.status(500).json({ error: error.message });
@@ -515,51 +593,44 @@ app.get(
   requireRole(["admin", "professional"]),
   async (req, res) => {
     try {
-      const { enrollments } = await initMongo();
-      const items = await enrollments
-        .aggregate([
-          {
-            $addFields: {
-              userObjectId: { $toObjectId: "$userId" }
+      const { cluster, collections, config } = await getDb();
+      const enrollmentsPath = collectionPath(config, config.collections.enrollments);
+
+      const { rows } = await cluster.query(
+        `SELECT en.*
+         FROM ${enrollmentsPath} en
+         ORDER BY en.createdAt DESC`,
+        {}
+      );
+
+      const items = await Promise.all(
+        rows.map(async (row) => {
+          const [eventResult, userResult] = await Promise.all([
+            collections.events.get(row.eventId),
+            collections.users.get(row.userId)
+          ]);
+
+          const user = userResult.content;
+
+          return {
+            id: row.id,
+            status: row.status,
+            reminderMinutes: row.reminderMinutes,
+            createdAt: row.createdAt,
+            cancelledAt: row.cancelledAt,
+            event: eventResult.content,
+            user: {
+              id: user.id,
+              name: user.name,
+              email: user.email,
+              role: user.role
             }
-          },
-          {
-            $lookup: {
-              from: "users",
-              localField: "userObjectId",
-              foreignField: "_id",
-              as: "user"
-            }
-          },
-          {
-            $lookup: {
-              from: "events",
-              localField: "eventId",
-              foreignField: "_id",
-              as: "event"
-            }
-          },
-          { $unwind: "$event" },
-          { $unwind: "$user" },
-          { $sort: { createdAt: -1 } }
-        ])
-        .toArray();
+          };
+        })
+      );
 
       return res.json({
-        items: items.map((item) => ({
-          id: item._id.toString(),
-          status: item.status,
-          reminderMinutes: item.reminderMinutes,
-          createdAt: item.createdAt,
-          cancelledAt: item.cancelledAt,
-          event: { id: item.event._id.toString(), ...item.event },
-          user: {
-            id: item.user._id.toString(),
-            name: item.user.name,
-            email: item.user.email,
-            role: item.user.role
-          }
-        }))
+        items
       });
     } catch (error) {
       return res.status(500).json({ error: error.message });
@@ -569,66 +640,73 @@ app.get(
 
 app.post("/api/enrollments/:id/cancel", requireAuth, async (req, res) => {
   try {
-    const { enrollments } = await initMongo();
-    const objectId = toObjectId(req.params.id);
-    if (!objectId) {
-      return res.status(400).json({ error: "Id invalido." });
-    }
+    const { collections } = await getDb();
+    const enrollmentId = req.params.id;
 
-    const enrollment = await enrollments.findOne({ _id: objectId });
-    if (!enrollment) {
-      return res.status(404).json({ error: "Inscricao nao encontrada." });
-    }
+    const result = await collections.enrollments.get(enrollmentId);
+    const enrollment = result.content;
 
     if (enrollment.userId !== req.session.userId) {
       return res.status(403).json({ error: "Acesso negado." });
     }
 
-    await enrollments.updateOne(
-      { _id: enrollment._id },
-      { $set: { status: "cancelled", cancelledAt: new Date().toISOString() } }
-    );
+    const update = {
+      ...enrollment,
+      status: "cancelled",
+      cancelledAt: new Date().toISOString()
+    };
+
+    await collections.enrollments.replace(enrollmentId, update);
 
     return res.json({ ok: true });
   } catch (error) {
+    if (error instanceof couchbase.DocumentNotFoundError) {
+      return res.status(404).json({ error: "Inscricao nao encontrada." });
+    }
     return res.status(500).json({ error: error.message });
   }
 });
 
 app.get("/api/reminders/upcoming", requireAuth, async (req, res) => {
   try {
-    const { enrollments } = await initMongo();
+    const { cluster, collections, config } = await getDb();
     const windowHours = Math.min(Math.max(parseInt(req.query.hours, 10) || 24, 1), 168);
     const now = new Date();
     const later = new Date(now.getTime() + windowHours * 60 * 60 * 1000);
 
-    const items = await enrollments
-      .aggregate([
-        { $match: { userId: req.session.userId, status: "active" } },
-        {
-          $lookup: {
-            from: "events",
-            localField: "eventId",
-            foreignField: "_id",
-            as: "event"
-          }
-        },
-        { $unwind: "$event" },
-        {
-          $match: {
-            "event.startAt": { $gte: now.toISOString(), $lte: later.toISOString() }
-          }
-        },
-        { $sort: { "event.startAt": 1 } }
-      ])
-      .toArray();
+    const enrollmentsPath = collectionPath(config, config.collections.enrollments);
+
+    const { rows } = await cluster.query(
+      `SELECT en.*
+       FROM ${enrollmentsPath} en
+       WHERE en.userId = $userId AND en.status = "active"
+       ORDER BY en.createdAt DESC`,
+      {
+        parameters: {
+          userId: req.session.userId
+        }
+      }
+    );
+
+    const items = [];
+    for (const row of rows) {
+      const eventResult = await collections.events.get(row.eventId);
+      const event = eventResult.content;
+      const startAt = parseISODate(event.startAt);
+
+      if (startAt && startAt >= now && startAt <= later) {
+        items.push({
+          id: row.id,
+          reminderMinutes: row.reminderMinutes,
+          event
+        });
+      }
+    }
+
+    items.sort((a, b) => a.event.startAt.localeCompare(b.event.startAt));
 
     return res.json({
-      items: items.map((item) => ({
-        id: item._id.toString(),
-        reminderMinutes: item.reminderMinutes,
-        event: { id: item.event._id.toString(), ...item.event }
-      }))
+      items
     });
   } catch (error) {
     return res.status(500).json({ error: error.message });

@@ -1,7 +1,7 @@
 {
-  "name": "carros-mongodb",
+  "name": "agendamento-couchbase",
   "version": "1.0.0",
-  "description": "Registro de carros com MongoDB",
+  "description": "Sistema de agendamento com Couchbase",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
@@ -10,11 +10,10 @@
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
-    "connect-mongo": "^5.1.0",
+    "couchbase": "^4.4.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "express-session": "^1.18.1",
-    "mongodb": "^6.8.0"
+    "express-session": "^1.18.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

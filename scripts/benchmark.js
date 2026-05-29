@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const dotenv = require("dotenv");
-const { MongoClient } = require("mongodb");
+const couchbase = require("couchbase");
 
 dotenv.config();
 
@@ -60,6 +60,7 @@ function summarize(latencies, totalMs) {
 
 function buildEventPayload(index) {
   return {
+    id: `bench-${String(index).padStart(5, "0")}`,
     code: `EVT-${String(index).padStart(5, "0")}`,
     title: `Evento Benchmark ${index}`,
     description: "Carga sintetica para benchmark.",
@@ -70,64 +71,90 @@ function buildEventPayload(index) {
     capacity: 20,
     status: "open",
     createdBy: "benchmark",
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    type: "bench"
   };
 }
 
 async function main() {
-  const uri = process.env.MONGODB_URI;
-  const dbName = process.env.MONGODB_DB || "agendamentos";
+  const url = process.env.COUCHBASE_URL || "couchbase://localhost";
+  const username = process.env.COUCHBASE_USERNAME || "Administrator";
+  const password = process.env.COUCHBASE_PASSWORD;
+  const bucketName = process.env.COUCHBASE_BUCKET || "agendamentos";
+  const scopeName = process.env.COUCHBASE_SCOPE || "_default";
+  const eventsCollectionName = process.env.COUCHBASE_COLLECTION_EVENTS || "events";
 
-  if (!uri) {
-    throw new Error("MONGODB_URI nao configurado.");
+  if (!password) {
+    throw new Error("COUCHBASE_PASSWORD nao configurado.");
   }
 
-  const client = new MongoClient(uri);
-  await client.connect();
-  const db = client.db(dbName);
-  const events = db.collection("events_bench");
+  const cluster = await couchbase.connect(url, { username, password });
+  const bucket = cluster.bucket(bucketName);
+  const scope = bucket.scope(scopeName);
+  const events = scope.collection(eventsCollectionName);
 
-  await events.deleteMany({});
+  const eventsPath = `\`${bucketName}\`.\`${scopeName}\`.\`${eventsCollectionName}\``;
+  await cluster.query(`DELETE FROM ${eventsPath} WHERE type = "bench"`);
 
   const ids = Array.from({ length: CONFIG.inserts }, (_, i) => i);
 
   const insertLatencies = [];
   const insertStart = nowMs();
-  await runWithConcurrency(ids, async (id, idx) => {
-    const start = nowMs();
-    await events.insertOne(buildEventPayload(idx));
-    insertLatencies.push(nowMs() - start);
-  }, CONFIG.concurrency);
+  await runWithConcurrency(
+    ids,
+    async (id, idx) => {
+      const start = nowMs();
+      const payload = buildEventPayload(idx);
+      await events.upsert(payload.id, payload);
+      insertLatencies.push(nowMs() - start);
+    },
+    CONFIG.concurrency
+  );
   const insertTotal = nowMs() - insertStart;
 
   const readLatencies = [];
   const readStart = nowMs();
-  await runWithConcurrency(ids.slice(0, CONFIG.reads), async (_, idx) => {
-    const start = nowMs();
-    await events.findOne({ code: `EVT-${String(idx).padStart(5, "0")}` });
-    readLatencies.push(nowMs() - start);
-  }, CONFIG.concurrency);
+  await runWithConcurrency(
+    ids.slice(0, CONFIG.reads),
+    async (_, idx) => {
+      const start = nowMs();
+      await events.get(`bench-${String(idx).padStart(5, "0")}`);
+      readLatencies.push(nowMs() - start);
+    },
+    CONFIG.concurrency
+  );
   const readTotal = nowMs() - readStart;
 
   const updateLatencies = [];
   const updateStart = nowMs();
-  await runWithConcurrency(ids.slice(0, CONFIG.updates), async (_, idx) => {
-    const start = nowMs();
-    await events.updateOne(
-      { code: `EVT-${String(idx).padStart(5, "0")}` },
-      { $set: { location: "Sala 02", updatedAt: new Date().toISOString() } }
-    );
-    updateLatencies.push(nowMs() - start);
-  }, CONFIG.concurrency);
+  await runWithConcurrency(
+    ids.slice(0, CONFIG.updates),
+    async (_, idx) => {
+      const start = nowMs();
+      const key = `bench-${String(idx).padStart(5, "0")}`;
+      const doc = await events.get(key);
+      await events.replace(key, {
+        ...doc.content,
+        location: "Sala 02",
+        updatedAt: new Date().toISOString()
+      });
+      updateLatencies.push(nowMs() - start);
+    },
+    CONFIG.concurrency
+  );
   const updateTotal = nowMs() - updateStart;
 
   const deleteLatencies = [];
   const deleteStart = nowMs();
-  await runWithConcurrency(ids.slice(0, CONFIG.deletes), async (_, idx) => {
-    const start = nowMs();
-    await events.deleteOne({ code: `EVT-${String(idx).padStart(5, "0")}` });
-    deleteLatencies.push(nowMs() - start);
-  }, CONFIG.concurrency);
+  await runWithConcurrency(
+    ids.slice(0, CONFIG.deletes),
+    async (_, idx) => {
+      const start = nowMs();
+      await events.remove(`bench-${String(idx).padStart(5, "0")}`);
+      deleteLatencies.push(nowMs() - start);
+    },
+    CONFIG.concurrency
+  );
   const deleteTotal = nowMs() - deleteStart;
 
   const payloadSize = Buffer.from(JSON.stringify(buildEventPayload(1))).length;
@@ -151,7 +178,7 @@ async function main() {
   fs.writeFileSync(outputPath, JSON.stringify(results, null, 2));
 
   console.log("Benchmark concluido. Resultados em data/results.json");
-  await client.close();
+  await cluster.close();
 }
 
 main().catch((error) => {
